@@ -1,0 +1,155 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Screen Audio Transcriber</title>
+</head>
+<body>
+  <div style="display: flex; flex-direction: column; gap: 10px; padding: 20px;">
+    <h1>Screen Audio Transcriber</h1>
+    <button id="start" style="padding: 10px; font-size: 16px; cursor: pointer;">Start Screen Share</button>
+    <div>
+      <h3>Transcription:</h3>
+      <pre id="output" style="background-color: #f5f5f5; padding: 10px; min-height: 200px; max-height: 400px; overflow-y: auto; border: 1px solid #ddd;"></pre>
+    </div>
+    <!-- <div>
+      <h3>Debug Log:</h3>
+      <div id="debug" style="background-color: #f5f5f5; padding: 10px; height: 200px; overflow-y: auto; border: 1px solid #ddd; font-family: monospace; font-size: 12px;"></div>
+    </div> -->
+
+  <script>
+    const startBtn = document.getElementById('start');
+    const output = document.getElementById('output');
+    let ws;
+    
+    // Helper function for logging with timestamps
+    function log(message) {
+      const timestamp = new Date().toISOString();
+      console.log(`[${timestamp}] ${message}`);
+      
+      // Optionally add debug info to the page for visibility
+      // const debugEl = document.getElementById('debug');
+      // if (debugEl) debugEl.innerHTML += `<div>[${timestamp}] ${message}</div>`;
+    }
+  
+    startBtn.onclick = async () => {
+      log('Starting screen sharing...');
+      try {
+        const stream = await navigator.mediaDevices.getDisplayMedia({
+          video: true,
+          audio: true
+        });
+        log('Screen sharing access granted');
+  
+        const audioCtx = new AudioContext({ sampleRate: 16000 });
+        log(`Audio context created: sampleRate=${audioCtx.sampleRate}Hz`);
+        
+        const source = audioCtx.createMediaStreamSource(stream);
+        log('Media stream source created');
+        
+        const processor = audioCtx.createScriptProcessor(4096, 1, 1);
+        log(`Audio processor created: bufferSize=${processor.bufferSize}`);
+  
+        source.connect(processor);
+        processor.connect(audioCtx.destination);
+        log('Audio processing pipeline connected');
+  
+        log('Initializing WebSocket connection to server...');
+        ws = new WebSocket("ws://localhost:8080");
+        
+        let audioChunkCounter = 0;
+        let totalBytesSent = 0;
+  
+        ws.onmessage = (event) => {
+          log(`Received message from server: ${event.data.length} bytes`);
+          try {
+            const data = JSON.parse(event.data);
+            if (data.transcript) {
+              log(`Received transcript: "${data.transcript}"`);
+              output.textContent += data.transcript + "\n";
+            } else {
+              log(`Received non-transcript data: ${JSON.stringify(data)}`);
+            }
+          } catch (error) {
+            log(`Error parsing message from server: ${error.message}`);
+          }
+        };
+  
+        ws.onopen = () => {
+            log("WebSocket connected successfully");
+  
+            processor.onaudioprocess = (e) => {
+                const input = e.inputBuffer.getChannelData(0);
+                if (!input || input.length === 0) return;
+
+                const downsampled = downsampleBuffer(input, audioCtx.sampleRate, 16000);
+                if (!downsampled || downsampled.length === 0) return;
+
+                const int16 = convertFloat32ToInt16(downsampled);
+                if (ws.readyState === WebSocket.OPEN) {
+                    ws.send(int16);
+                }
+                };
+
+        };
+        
+        ws.onerror = (error) => {
+          log(`WebSocket error: ${error.message || 'Unknown error'}`);
+        };
+        
+        ws.onclose = (event) => {
+          log(`WebSocket closed: code=${event.code}, reason=${event.reason || 'No reason provided'}`);
+          log(`Session summary: Processed ${audioChunkCounter} audio chunks, sent ${totalBytesSent} bytes total`);
+        };
+        
+      } catch (error) {
+        log(`Error starting screen share: ${error.message}`);
+        alert(`Failed to start screen sharing: ${error.message}`);
+      }
+    };
+  
+    function downsampleBuffer(buffer, sampleRate, outSampleRate) {
+      // Early return if no downsampling is needed
+      if (outSampleRate === sampleRate) {
+        // log('No downsampling needed, sample rates match');
+        return buffer;
+      }
+      // log(`Downsampling from ${sampleRate}Hz to ${outSampleRate}Hz`);
+  
+      const sampleRateRatio = sampleRate / outSampleRate;
+      const newLength = Math.round(buffer.length / sampleRateRatio);
+      const result = new Float32Array(newLength);
+  
+      let offsetResult = 0;
+      let offsetBuffer = 0;
+  
+      while (offsetResult < result.length) {
+        const nextOffsetBuffer = Math.round((offsetResult + 1) * sampleRateRatio);
+        let accum = 0, count = 0;
+        for (let i = offsetBuffer; i < nextOffsetBuffer && i < buffer.length; i++) {
+          accum += buffer[i];
+          count++;
+        }
+        result[offsetResult] = accum / count;
+        offsetResult++;
+        offsetBuffer = nextOffsetBuffer;
+      }
+  
+      return result;
+    }
+  
+    function convertFloat32ToInt16(buffer) {
+      // log(`Converting Float32 buffer to Int16: length=${buffer.length}`);
+      const l = buffer.length;
+      const buf = new Int16Array(l);
+      for (let i = 0; i < l; i++) {
+        const s = Math.max(-1, Math.min(1, buffer[i]));
+        buf[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
+      }
+      return buf.buffer;
+    }
+  </script>
+  
+</body>
+</html>
